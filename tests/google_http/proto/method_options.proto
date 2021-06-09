@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+import "google/api/annotations.proto";
+
+package method_options;
+
+service Svc {
+  rpc Method(Req) returns (Resp) {
+    option (google.api.http) = {
+      post: "/Svc/v1/MethodFoo"
+      body: "*"
+    };
+  }
+}
+
+message Req {}
+
+message Resp {}

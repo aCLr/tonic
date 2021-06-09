@@ -83,7 +83,7 @@ mod prost;
 
 #[cfg(feature = "prost")]
 #[cfg_attr(docsrs, doc(cfg(feature = "prost")))]
-pub use prost::{compile_protos, configure, Builder};
+pub use prost::{compile_protos, configure, Builder, configure_gateway, compile_gateway_protos};
 
 #[cfg(feature = "rustfmt")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rustfmt")))]

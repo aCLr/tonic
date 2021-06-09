@@ -5,11 +5,12 @@ use quote::ToTokens;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::marker::PhantomData;
 
 /// Configure `tonic-build` code generation.
 ///
 /// Use [`compile_protos`] instead if you don't need to tweak anything.
-pub fn configure() -> Builder {
+pub fn configure() -> Builder<DefaultServiceGeneratorFactory, ServiceGenerator> {
     Builder {
         build_client: true,
         build_server: true,
@@ -24,6 +25,36 @@ pub fn configure() -> Builder {
         format: true,
         emit_package: true,
         protoc_args: Vec::new(),
+        service_generator_factory: DefaultServiceGeneratorFactory{},
+        phantom_data: PhantomData,
+    }
+}
+
+pub fn configure_gateway() -> Builder<GatewayServiceGeneratorFactory, GatewayServiceGenerator> {
+    Builder {
+        build_client: true,
+        build_server: true,
+        file_descriptor_set_path: None,
+        out_dir: None,
+        extern_path: Vec::new(),
+        field_attributes: Vec::new(),
+        type_attributes: Vec::new(),
+        proto_path: "super".to_string(),
+        compile_well_known_types: false,
+        #[cfg(feature = "rustfmt")]
+        format: true,
+        emit_package: true,
+        protoc_args: Vec::new(),
+        service_generator_factory: GatewayServiceGeneratorFactory{},
+        phantom_data: PhantomData,
+    }
+}
+
+pub struct DefaultServiceGeneratorFactory {}
+
+impl ServiceGeneratorFactory<ServiceGenerator> for DefaultServiceGeneratorFactory {
+    fn build(self, config: ServiceGeneratorConfig) -> ServiceGenerator {
+        ServiceGenerator::new(config)
     }
 }
 
@@ -43,6 +74,20 @@ pub fn compile_protos(proto: impl AsRef<Path>) -> io::Result<()> {
 
     Ok(())
 }
+
+pub fn compile_gateway_protos(proto: impl AsRef<Path>) -> io::Result<()> {
+    let proto_path: &Path = proto.as_ref();
+
+    // directory the main .proto file resides in
+    let proto_dir = proto_path
+        .parent()
+        .expect("proto file should reside in a directory");
+
+    self::configure_gateway().compile(&[proto_path], &[proto_dir])?;
+
+    Ok(())
+}
+
 
 const PROST_CODEC_PATH: &str = "tonic::codec::ProstCodec";
 
@@ -138,47 +183,64 @@ fn is_google_type(ty: &str) -> bool {
     ty.starts_with(".google.protobuf")
 }
 
-struct ServiceGenerator {
-    builder: Builder,
-    clients: TokenStream,
-    servers: TokenStream,
+pub struct ServiceGeneratorConfig {
+    pub(crate) build_client: bool,
+    pub(crate) proto_path: String,
+    pub(crate) build_server: bool,
+    pub(crate) emit_package: bool,
+    pub(crate) compile_well_known_types: bool,
 }
 
-impl ServiceGenerator {
-    fn new(builder: Builder) -> Self {
-        ServiceGenerator {
-            builder,
+pub struct GatewayServiceGenerator {
+    clients: TokenStream,
+    servers: TokenStream,
+    config: ServiceGeneratorConfig,
+}
+
+pub struct GatewayServiceGeneratorFactory {}
+
+impl ServiceGeneratorFactory<GatewayServiceGenerator> for GatewayServiceGeneratorFactory {
+    fn build(self, config: ServiceGeneratorConfig) -> GatewayServiceGenerator {
+        GatewayServiceGenerator::new(config)
+    }
+}
+
+
+impl GatewayServiceGenerator {
+    fn new(config: ServiceGeneratorConfig) -> Self {
+        Self {
+            config,
             clients: TokenStream::default(),
             servers: TokenStream::default(),
         }
     }
 }
 
-impl prost_build::ServiceGenerator for ServiceGenerator {
+impl prost_build::ServiceGenerator for GatewayServiceGenerator {
     fn generate(&mut self, service: prost_build::Service, _buf: &mut String) {
-        if self.builder.build_server {
-            let server = server::generate(
+        if self.config.build_server {
+            let server = server::generate_gateway(
                 &service,
-                self.builder.emit_package,
-                &self.builder.proto_path,
-                self.builder.compile_well_known_types,
+                self.config.emit_package,
+                &self.config.proto_path,
+                self.config.compile_well_known_types,
             );
             self.servers.extend(server);
         }
 
-        if self.builder.build_client {
+        if self.config.build_client {
             let client = client::generate(
                 &service,
-                self.builder.emit_package,
-                &self.builder.proto_path,
-                self.builder.compile_well_known_types,
+                self.config.emit_package,
+                &self.config.proto_path,
+                self.config.compile_well_known_types,
             );
             self.clients.extend(client);
         }
     }
 
     fn finalize(&mut self, buf: &mut String) {
-        if self.builder.build_client && !self.clients.is_empty() {
+        if self.config.build_client && !self.clients.is_empty() {
             let clients = &self.clients;
 
             let client_service = quote::quote! {
@@ -191,7 +253,7 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
             self.clients = TokenStream::default();
         }
 
-        if self.builder.build_server && !self.servers.is_empty() {
+        if self.config.build_server && !self.servers.is_empty() {
             let servers = &self.servers;
 
             let server_service = quote::quote! {
@@ -206,9 +268,80 @@ impl prost_build::ServiceGenerator for ServiceGenerator {
     }
 }
 
+pub struct ServiceGenerator {
+    clients: TokenStream,
+    servers: TokenStream,
+    config: ServiceGeneratorConfig,
+}
+
+impl ServiceGenerator {
+    fn new(config: ServiceGeneratorConfig) -> Self {
+        ServiceGenerator {
+            config,
+            clients: TokenStream::default(),
+            servers: TokenStream::default(),
+        }
+    }
+}
+
+impl prost_build::ServiceGenerator for ServiceGenerator {
+    fn generate(&mut self, service: prost_build::Service, _buf: &mut String) {
+        if self.config.build_server {
+            let server = server::generate(
+                &service,
+                self.config.emit_package,
+                &self.config.proto_path,
+                self.config.compile_well_known_types,
+            );
+            self.servers.extend(server);
+        }
+
+        if self.config.build_client {
+            let client = client::generate(
+                &service,
+                self.config.emit_package,
+                &self.config.proto_path,
+                self.config.compile_well_known_types,
+            );
+            self.clients.extend(client);
+        }
+    }
+
+    fn finalize(&mut self, buf: &mut String) {
+        if self.config.build_client && !self.clients.is_empty() {
+            let clients = &self.clients;
+
+            let client_service = quote::quote! {
+                #clients
+            };
+
+            let code = format!("{}", client_service);
+            buf.push_str(&code);
+
+            self.clients = TokenStream::default();
+        }
+
+        if self.config.build_server && !self.servers.is_empty() {
+            let servers = &self.servers;
+
+            let server_service = quote::quote! {
+                #servers
+            };
+
+            let code = format!("{}", server_service);
+            buf.push_str(&code);
+
+            self.servers = TokenStream::default();
+        }
+    }
+}
+
+pub trait ServiceGeneratorFactory<T: prost_build::ServiceGenerator> {
+    fn build(self, config: ServiceGeneratorConfig) -> T;
+}
+
 /// Service generator builder.
-#[derive(Debug, Clone)]
-pub struct Builder {
+pub struct Builder<F, S> where F: ServiceGeneratorFactory<S>, S: prost_build::ServiceGenerator {
     pub(crate) build_client: bool,
     pub(crate) build_server: bool,
     pub(crate) file_descriptor_set_path: Option<PathBuf>,
@@ -219,13 +352,21 @@ pub struct Builder {
     pub(crate) emit_package: bool,
     pub(crate) compile_well_known_types: bool,
     pub(crate) protoc_args: Vec<OsString>,
+    pub(crate) service_generator_factory: F,
+    phantom_data: PhantomData<S>,
 
     out_dir: Option<PathBuf>,
     #[cfg(feature = "rustfmt")]
     format: bool,
+
 }
 
-impl Builder {
+impl<F, S> Builder<F, S> where F: ServiceGeneratorFactory<S>, S: prost_build::ServiceGenerator, S: 'static {
+    pub fn service_generator_factory(mut self, factory: F) -> Self {
+        self.service_generator_factory = factory;
+        self
+    }
+
     /// Enable or disable gRPC client code generation.
     pub fn build_client(mut self, enable: bool) -> Self {
         self.build_client = enable;
@@ -374,7 +515,13 @@ impl Builder {
             config.protoc_arg(arg);
         }
 
-        config.service_generator(Box::new(ServiceGenerator::new(self)));
+        config.service_generator(Box::new(self.service_generator_factory.build(ServiceGeneratorConfig{
+            build_client: self.build_client,
+            proto_path: self.proto_path,
+            build_server: self.build_server,
+            emit_package: self.emit_package,
+            compile_well_known_types: self.compile_well_known_types,
+        })));
 
         config.compile_protos(protos, includes)?;
 

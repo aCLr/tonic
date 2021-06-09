@@ -123,6 +123,126 @@ pub fn generate<T: Service>(
     }
 }
 
+pub fn generate_gateway<T: Service>(
+    service: &T,
+    emit_package: bool,
+    proto_path: &str,
+    compile_well_known_types: bool,
+) -> TokenStream {
+    let methods = generate_methods(service, proto_path, compile_well_known_types);
+
+    let server_service = quote::format_ident!("{}Server", service.name());
+    let server_trait = quote::format_ident!("{}", service.name());
+    let server_mod = quote::format_ident!("{}_server", naive_snake_case(&service.name()));
+    let generated_trait = generate_trait(
+        service,
+        proto_path,
+        compile_well_known_types,
+        server_trait.clone(),
+    );
+    let service_doc = generate_doc_comments(service.comment());
+    let package = if emit_package { service.package() } else { "" };
+    // Transport based implementations
+    let path = format!(
+        "{}{}{}",
+        package,
+        if package.is_empty() { "" } else { "." },
+        service.identifier()
+    );
+    let transport = generate_transport(&server_service, &server_trait, &path);
+    let gateway_paths = "OKOKO";
+
+    quote! {
+        /// Generated server implementations.
+        pub mod #server_mod {
+            #![allow(unused_variables, dead_code, missing_docs)]
+            use tonic::codegen::*;
+
+            #generated_trait
+
+            pub fn get_paths() -> String {
+                #gateway_paths.to_string()
+            }
+
+            #service_doc
+            #[derive(Debug)]
+            pub struct #server_service<T: #server_trait> {
+                inner: _Inner<T>,
+            }
+
+            struct _Inner<T>(Arc<T>);
+
+            impl<T: #server_trait> #server_service<T> {
+                pub fn new(inner: T) -> Self {
+                    let inner = Arc::new(inner);
+                    let inner = _Inner(inner);
+                    Self { inner }
+                }
+
+                pub fn with_interceptor<F>(inner: T, interceptor: F) -> InterceptedService<Self, F>
+                where
+                    F: FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status>,
+                {
+                    InterceptedService::new(Self::new(inner), interceptor)
+                }
+            }
+
+            impl<T, B> Service<http::Request<B>> for #server_service<T>
+                where
+                    T: #server_trait,
+                    B: Body + Send + Sync + 'static,
+                    B::Error: Into<StdError> + Send + 'static,
+            {
+                type Response = http::Response<tonic::body::BoxBody>;
+                type Error = Never;
+                type Future = BoxFuture<Self::Response, Self::Error>;
+
+                fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                    Poll::Ready(Ok(()))
+                }
+
+                fn call(&mut self, req: http::Request<B>) -> Self::Future {
+                    let inner = self.inner.clone();
+
+                    match req.uri().path() {
+                        #methods
+
+                        _ => Box::pin(async move {
+                            Ok(http::Response::builder()
+                               .status(200)
+                               .header("grpc-status", "12")
+                               .header("content-type", "application/grpc")
+                               .body(empty_body())
+                               .unwrap())
+                        }),
+                    }
+                }
+            }
+
+            impl<T: #server_trait> Clone for #server_service<T> {
+                fn clone(&self) -> Self {
+                    let inner = self.inner.clone();
+                    Self { inner }
+                }
+            }
+
+            impl<T: #server_trait> Clone for _Inner<T> {
+                fn clone(&self) -> Self {
+                    Self(self.0.clone())
+                }
+            }
+
+            impl<T: std::fmt::Debug> std::fmt::Debug for _Inner<T> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                   write!(f, "{:?}", self.0)
+                }
+            }
+
+            #transport
+        }
+    }
+}
+
 fn generate_trait<T: Service>(
     service: &T,
     proto_path: &str,
